@@ -11,3 +11,4 @@ digest.txt
 .deepspeed_env
 scripts/
 .venv_install.*.lock
+.DS_Store
