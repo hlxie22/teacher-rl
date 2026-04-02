@@ -1,0 +1,224 @@
+paths:
+  data_dir: data
+  coord_dir: data/coord_rl
+  outputs_dir: outputs
+
+  train_pool_path: data/train_pool.jsonl
+  replay_buffer_path: data/replay_buffer.jsonl
+
+  student_cache_dir: data/student_cache
+  teacher_cache_dir: data/teacher_cache
+  student_cache_merged: data/student_cache_merged.jsonl
+  teacher_cache_merged: data/teacher_cache_merged.jsonl
+
+  eval_aime24_path: data/eval_aime24.jsonl
+  eval_aime25_path: data/eval_aime25.jsonl
+  eval_hmmt25_path: data/eval_hmmt25.jsonl
+  eval_hmmt26_path: data/eval_hmmt26.jsonl
+  eval_amc_path: data/eval_amc.jsonl
+
+models:
+  student_model_id: "Qwen/Qwen3.5-0.8B"
+  teacher_model_id: "Qwen/Qwen3.5-4B"
+  teacher_init_adapter: null
+  enable_thinking: true
+  student_load_in_4bit: false
+
+  lora:
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+      - in_proj_qkv
+      - in_proj_z
+      - in_proj_b
+      - in_proj_a
+      - out_proj
+
+resources:
+  # legacy = preserve existing whole-node semantics exactly.
+  # packed = teacher-isolated packing:
+  #   - trainer ranks and student replicas may share a packed node
+  #   - teacher rollout replicas are packed onto dedicated teacher-only nodes
+  placement_mode: trl_colocate
+  isolate_teacher_rollout: true
+
+  gpus_per_node: 4
+  mem_per_node_gb: 96
+
+  trainer_nodes: 2
+  student_server_nodes: 1
+  teacher_rollout_nodes: 2
+  gpus_per_job: 4
+
+  trainer_gpus: 4
+  student_server_gpus: 2
+  teacher_rollout_gpus: 4
+
+student_server:
+  replicas: auto
+  base_port: 8100
+  dtype: bfloat16
+  max_model_len: 3072
+  gpu_memory_utilization: 0.85
+  cpus_per_replica: 3
+  startup_timeout_s: 1800
+
+teacher_rollout:
+  replicas: auto
+  base_port: 8200
+  dtype: bfloat16
+  tensor_parallel_size: 1
+  max_model_len: 3072
+  gpu_memory_utilization: 0.20
+  cpus_per_replica: 12
+  startup_timeout_s: 3600
+  request_timeout_s: 180
+  request_max_retries: 8
+  request_retry_backoff_s: 5
+  max_logprobs: 1
+  max_requests_per_server: 8
+  max_num_seqs: 64
+  extra_body: {}
+
+inference:
+  max_loras: 1
+  max_lora_rank: 32
+  language_model_only: true
+  cpu_offload_gb: 0
+  enforce_eager: false
+  disable_log_stats: true
+  attention_backend: TRITON_ATTN
+  cache_parallelism: slurm
+  cache_tp_size: 4
+  student_batch_size: 16
+  teacher_batch_size: 16
+
+jobs:
+  cache_student_jobs: 1
+  cache_teacher_jobs: 1
+
+filtering:
+  banned_substrings: []
+
+caching:
+  temperature: 0.6
+  top_p: 0.95
+  K_student: 8
+  K_teacher: 8
+  max_new_tokens_student: 512
+  max_new_tokens_teacher_solve: 1024
+
+mining:
+  teacher_interval: [0.7, 1.0]
+  student_interval: [0.0, 0.3]
+
+prompting:
+  hint_max_new_tokens: 128
+  hint_max_total_tokens: 256
+  hint_temperature: 0.7
+  hint_top_p: 0.95
+
+  student_system_prompt: |
+    You are a careful competition math student. Solve the problem step by step.
+    Put the final answer in \boxed{...}.
+
+  teacher_hint_system_prompt: |
+    You are a math teacher writing short recovery hints. Think step by step about the student's mistake and what guidance would best address it, then return exactly one concise hint inside <FINAL_HINT>...</FINAL_HINT> without revealing the final answer..
+
+  teacher_solve_system_prompt: "You are an expert competition math solver. Think step by step, solve the problem carefully, and put the final answer clearly in \\boxed{...}."
+  teacher_solve_numeric_system_prompt: "You are an expert competition math solver. Think step by step, solve the problem carefully, and put the final answer clearly in \\boxed{...}."
+
+training:
+  seed: 1234
+  batch_size: 4
+  grad_accum: 32
+  epochs_per_round: 1
+  lr: 1.0e-6
+  weight_decay: 0.0
+  bf16: true
+  save_steps: 200
+  save_total_limit: 2
+  gradient_checkpointing: true
+  max_steps: 0
+
+  deepspeed:
+    zero_stage: 3
+    offload_optimizer_device: none
+    offload_param_device: none
+
+
+grpo:
+  failures_per_example: 1
+  reward_student_device: cuda
+  reward_student_batch_size: 32
+  reward_student_aggregate_ranks_per_request: 1
+  num_generations: 8
+  beta_kl: 0.0
+  steps_per_generation: 4
+
+
+reward:
+  beta_leak: 1.0
+  gamma_len: 0.0
+  beta_bad_hint_format: 2.0
+  beta_overlong_hint: 2.0
+
+persistent:
+  rounds: 1
+  clean_coord: false
+  adapter_root: outputs/teacher_lora_persistent
+  live_adapter_root: outputs/teacher_lora_live
+  live_keep_last: 3
+
+eval:
+  teacher_eval:
+    enabled: true
+    schedule: post_train   
+    sweep: all_rounds      
+    every_rounds: 1
+    iid_source: replay_buffer
+    n_iid: 128
+    n_ood:
+      aime24: 30
+      aime25: 30
+      hmmt25: 30
+      hmmt26: 30
+      amc: 30
+    temperature: 0.2
+    top_p: 0.95
+    temperature_solve: 0.2
+    top_p_solve: 0.95
+    max_new_tokens_solve: 1024
+    batch_size: 16
+
+    gpus: auto
+
+  train_metrics:
+    ema_alpha: 0.05
+
+datasets:
+  math_train:
+    hf_id: EleutherAI/hendrycks_math
+
+  aime24:
+    hf_id: HuggingFaceH4/aime_2024
+
+  aime25:
+    hf_id: MathArena/aime_2025
+
+  hmmt_feb_2025:
+    hf_id: MathArena/hmmt_feb_2025
+    split: train
+
+  hmmt_feb_2026:
+    hf_id: MathArena/hmmt_feb_2026
+    split: train
+
+  amc_ood:
+    hf_id: AI-MO/aimo-validation-amc
+    split: train

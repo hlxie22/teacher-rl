@@ -1,0 +1,14 @@
+pyyaml>=6.0.1
+numpy>=1.26.0
+tqdm>=4.66.0
+sentencepiece
+huggingface-hub>=0.25.0
+setuptools>=77.0.3,<80
+transformers @ git+https://github.com/huggingface/transformers.git@main
+
+# vLLM is installed separately in slurm/common.sh.
+# Default bootstrap uses vLLM from git main unless VLLM_SPEC is overridden.
+#
+# Do not pin torch here.
+# Do not pin vllm here.
+# Do not hardcode a CUDA wheel index here.
