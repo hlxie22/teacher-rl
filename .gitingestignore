@@ -12,6 +12,7 @@
 /slurm/inspect_rollouts.slurm
 /.venv_infer/
 /.venv_train/
+/.venv_scripts/
 /extract_rank1.sh
 /err.txt
 /check.py

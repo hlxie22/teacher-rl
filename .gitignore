@@ -6,6 +6,7 @@ digest.txt
 .venv/
 *.pyc
 .venv/
+.venv_scripts/
 .venv_infer/
 .venv_train/
 .deepspeed_env

@@ -135,13 +135,13 @@ prompting:
 
 training:
   seed: 1234
-  batch_size: 4
-  grad_accum: 32
+  batch_size: 8
+  grad_accum: 16
   epochs_per_round: 1
   lr: 1.0e-6
   weight_decay: 0.0
   bf16: true
-  save_steps: 200
+  save_steps: 5
   save_total_limit: 2
   gradient_checkpointing: true
   max_steps: 0
@@ -160,7 +160,8 @@ grpo:
   num_generations: 8
   beta_kl: 0.0
   steps_per_generation: 4
-
+  vllm_gpu_memory_utilization: 0.28
+  vllm_max_model_length: 3172
 
 reward:
   beta_leak: 1.0
