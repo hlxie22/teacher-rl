@@ -1,7 +1,5 @@
 name: rtt-grpo
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
 dependencies:
   - python=3.12
@@ -10,11 +8,8 @@ dependencies:
   - setuptools>=77.0.3,<80
   - wheel
   - ninja
-  - pytorch
-  - torchvision
-  - pytorch-cuda=12.4
   - pip:
-      # Core runtime shared by GRPO training and post-train teacher eval.
+      - uv
       - pyyaml>=6.0.1
       - numpy>=1.26.0
       - tqdm>=4.66.0
@@ -27,8 +22,5 @@ dependencies:
       - safetensors>=0.4
       - accelerate>=1.1
       - peft>=0.18
-      - trl==0.29.1
       - deepspeed>=0.15
       - pysqlite3-binary
-      - transformers @ git+https://github.com/huggingface/transformers.git@main
-      - vllm

@@ -74,7 +74,7 @@ teacher_rollout:
   dtype: bfloat16
   tensor_parallel_size: 1
   max_model_len: 3072
-  gpu_memory_utilization: 0.20
+  gpu_memory_utilization: 0.80
   cpus_per_replica: 12
   startup_timeout_s: 3600
   request_timeout_s: 180
@@ -82,7 +82,7 @@ teacher_rollout:
   request_retry_backoff_s: 5
   max_logprobs: 1
   max_requests_per_server: 8
-  max_num_seqs: 64
+  max_num_seqs: 32
   extra_body: {}
 
 inference:
@@ -161,7 +161,7 @@ grpo:
   beta_kl: 0.0
   steps_per_generation: 4
   vllm_gpu_memory_utilization: 0.28
-  vllm_max_model_length: 3172
+  vllm_max_model_length: 3072
 
 reward:
   beta_leak: 1.0
@@ -200,7 +200,7 @@ eval:
     gpus: auto
 
   train_metrics:
-    ema_alpha: 0.05
+    ema_alpha: 0.01
 
 datasets:
   math_train:

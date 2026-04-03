@@ -104,6 +104,10 @@ def _extract_text_completion(x: Any) -> str:
     return str(x)
 
 
+def _token_count(tokenizer: Any, text: Any) -> int:
+    return int(len(tokenizer.encode(str(text), add_special_tokens=False)))
+
+
 def _truncate_to_token_limit(tokenizer, text: str, max_tokens: int) -> str:
     if not text or max_tokens <= 0:
         return ''
@@ -844,18 +848,59 @@ class _MetricAccum:
     reward_sum: float = 0.0
     reward_student_time_sum: float = 0.0
     reward_total_time_sum: float = 0.0
+
+    teacher_new_sum: float = 0.0
+    teacher_total_sum: float = 0.0
+    student_new_sum: float = 0.0
+    student_total_sum: float = 0.0
+
+    teacher_new_max: float = 0.0
+    teacher_total_max: float = 0.0
+    student_new_max: float = 0.0
+    student_total_max: float = 0.0
+
+    teacher_trunc_count: int = 0
+    student_trunc_count: int = 0
     n: int = 0
 
-    def add(self, delta: float, leak: float, hint_len: float, reward: float, reward_student_time: float, reward_total_time: float) -> None:
+    def add(
+        self,
+        *,
+        delta: float,
+        leak: float,
+        hint_len: float,
+        reward: float,
+        reward_student_time: float,
+        reward_total_time: float,
+        teacher_new: float,
+        teacher_total: float,
+        student_new: float,
+        student_total: float,
+        teacher_trunc: int,
+        student_trunc: int,
+    ) -> None:
         self.delta_sum += float(delta)
         self.leak_sum += float(leak)
         self.hint_len_sum += float(hint_len)
         self.reward_sum += float(reward)
         self.reward_student_time_sum += float(reward_student_time)
         self.reward_total_time_sum += float(reward_total_time)
+
+        self.teacher_new_sum += float(teacher_new)
+        self.teacher_total_sum += float(teacher_total)
+        self.student_new_sum += float(student_new)
+        self.student_total_sum += float(student_total)
+
+        self.teacher_new_max = max(self.teacher_new_max, float(teacher_new))
+        self.teacher_total_max = max(self.teacher_total_max, float(teacher_total))
+        self.student_new_max = max(self.student_new_max, float(student_new))
+        self.student_total_max = max(self.student_total_max, float(student_total))
+
+        self.teacher_trunc_count += int(teacher_trunc)
+        self.student_trunc_count += int(student_trunc)
         self.n += 1
 
-    def snapshot_and_reset(self) -> tuple[float, float, float, float, float, float, int]:
+    def snapshot_and_reset(self):
         out = (
             self.delta_sum,
             self.leak_sum,
@@ -863,10 +908,25 @@ class _MetricAccum:
             self.reward_sum,
             self.reward_student_time_sum,
             self.reward_total_time_sum,
+            self.teacher_new_sum,
+            self.teacher_total_sum,
+            self.student_new_sum,
+            self.student_total_sum,
+            self.teacher_new_max,
+            self.teacher_total_max,
+            self.student_new_max,
+            self.student_total_max,
+            self.teacher_trunc_count,
+            self.student_trunc_count,
             self.n,
         )
         self.delta_sum = self.leak_sum = self.hint_len_sum = self.reward_sum = 0.0
         self.reward_student_time_sum = self.reward_total_time_sum = 0.0
+        self.teacher_new_sum = self.teacher_total_sum = 0.0
+        self.student_new_sum = self.student_total_sum = 0.0
+        self.teacher_new_max = self.teacher_total_max = 0.0
+        self.student_new_max = self.student_total_max = 0.0
+        self.teacher_trunc_count = self.student_trunc_count = 0
         self.n = 0
         return out
 
@@ -903,6 +963,12 @@ class TrainMetricsEMACallback(TrainerCallback):
         self.ema_reward_student_s: Optional[float] = None
         self.ema_reward_total_s: Optional[float] = None
         self.ema_step_time_s: Optional[float] = None
+        self.ema_teacher_new: Optional[float] = None
+        self.ema_teacher_total: Optional[float] = None
+        self.ema_student_new: Optional[float] = None
+        self.ema_student_total: Optional[float] = None
+        self.ema_teacher_trunc_rate: Optional[float] = None
+        self.ema_student_trunc_rate: Optional[float] = None
         self._t_step0: Optional[float] = None
 
     def _ema_update(self, old: Optional[float], x: float) -> float:
@@ -911,34 +977,72 @@ class TrainMetricsEMACallback(TrainerCallback):
         return (1.0 - self.alpha) * float(old) + self.alpha * float(x)
 
     def _flush(self, global_step: int) -> None:
-        dsum, lsum, hsum, rsum, rs_s, rt_s, n = METRICS_ACCUM.snapshot_and_reset()
+        (
+            dsum,
+            lsum,
+            hsum,
+            rsum,
+            rs_s,
+            rt_s,
+            teacher_new_sum,
+            teacher_total_sum,
+            student_new_sum,
+            student_total_sum,
+            teacher_new_max,
+            teacher_total_max,
+            student_new_max,
+            student_total_max,
+            teacher_trunc_count,
+            student_trunc_count,
+            n,
+        ) = METRICS_ACCUM.snapshot_and_reset()
         step_sum, step_n = STEP_ACCUM.snapshot_and_reset()
 
         dev = torch.device('cuda', _local_rank()) if torch.cuda.is_available() else torch.device('cpu')
-        t = torch.tensor(
-            [dsum, lsum, hsum, rsum, rs_s, rt_s, float(n), step_sum, float(step_n)],
+        sum_t = torch.tensor(
+            [
+                dsum, lsum, hsum, rsum, rs_s, rt_s,
+                teacher_new_sum, teacher_total_sum,
+                student_new_sum, student_total_sum,
+                float(teacher_trunc_count), float(student_trunc_count),
+                float(n), step_sum, float(step_n),
+            ],
+            device=dev,
+            dtype=torch.float64,
+        )
+        max_t = torch.tensor(
+            [teacher_new_max, teacher_total_max, student_new_max, student_total_max],
             device=dev,
             dtype=torch.float64,
         )
         if _is_dist():
-            torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(sum_t, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(max_t, op=torch.distributed.ReduceOp.MAX)
 
-        n_tot = int(t[6].item())
-        step_n_tot = int(t[8].item())
+        n_tot = int(sum_t[12].item())
+        step_n_tot = int(sum_t[14].item())
         if n_tot <= 0 and step_n_tot <= 0:
             return
 
         if n_tot > 0:
-            delta_mean = float((t[0] / t[6]).item())
-            leak_mean = float((t[1] / t[6]).item())
-            hint_len_mean = float((t[2] / t[6]).item())
-            reward_mean = float((t[3] / t[6]).item())
-            rs_mean = float((t[4] / t[6]).item())
-            rt_mean = float((t[5] / t[6]).item())
+            delta_mean = float((sum_t[0] / sum_t[12]).item())
+            leak_mean = float((sum_t[1] / sum_t[12]).item())
+            hint_len_mean = float((sum_t[2] / sum_t[12]).item())
+            reward_mean = float((sum_t[3] / sum_t[12]).item())
+            rs_mean = float((sum_t[4] / sum_t[12]).item())
+            rt_mean = float((sum_t[5] / sum_t[12]).item())
+            teacher_new_mean = float((sum_t[6] / sum_t[12]).item())
+            teacher_total_mean = float((sum_t[7] / sum_t[12]).item())
+            student_new_mean = float((sum_t[8] / sum_t[12]).item())
+            student_total_mean = float((sum_t[9] / sum_t[12]).item())
+            teacher_trunc_rate = float((sum_t[10] / sum_t[12]).item())
+            student_trunc_rate = float((sum_t[11] / sum_t[12]).item())
         else:
             delta_mean = leak_mean = hint_len_mean = reward_mean = rs_mean = rt_mean = float('nan')
+            teacher_new_mean = teacher_total_mean = student_new_mean = student_total_mean = float('nan')
+            teacher_trunc_rate = student_trunc_rate = float('nan')
 
-        step_time_mean = float((t[7] / t[8]).item()) if step_n_tot > 0 else float('nan')
+        step_time_mean = float((sum_t[13] / sum_t[14]).item()) if step_n_tot > 0 else float('nan')
         steps_per_s = (1.0 / step_time_mean) if step_time_mean and step_time_mean > 0 else float('nan')
         abs_step = self.step_offset + int(global_step)
 
@@ -950,6 +1054,12 @@ class TrainMetricsEMACallback(TrainerCallback):
             self.ema_reward_student_s = self._ema_update(self.ema_reward_student_s, rs_mean)
             self.ema_reward_total_s = self._ema_update(self.ema_reward_total_s, rt_mean)
             self.ema_step_time_s = self._ema_update(self.ema_step_time_s, step_time_mean)
+            self.ema_teacher_new = self._ema_update(self.ema_teacher_new, teacher_new_mean)
+            self.ema_teacher_total = self._ema_update(self.ema_teacher_total, teacher_total_mean)
+            self.ema_student_new = self._ema_update(self.ema_student_new, student_new_mean)
+            self.ema_student_total = self._ema_update(self.ema_student_total, student_total_mean)
+            self.ema_teacher_trunc_rate = self._ema_update(self.ema_teacher_trunc_rate, teacher_trunc_rate)
+            self.ema_student_trunc_rate = self._ema_update(self.ema_student_trunc_rate, student_trunc_rate)
 
             self.coord.update_state(
                 train_metrics_step=int(abs_step),
@@ -961,6 +1071,16 @@ class TrainMetricsEMACallback(TrainerCallback):
                 train_ema_reward_total_s=float(self.ema_reward_total_s),
                 train_ema_step_time_s=float(self.ema_step_time_s),
                 train_steps_per_s=float(steps_per_s),
+                train_ema_teacher_new_tokens=float(self.ema_teacher_new),
+                train_ema_teacher_total_tokens=float(self.ema_teacher_total),
+                train_teacher_new_tokens_max=float(max_t[0].item()),
+                train_teacher_total_tokens_max=float(max_t[1].item()),
+                train_ema_teacher_truncation_rate=float(self.ema_teacher_trunc_rate),
+                train_ema_student_new_tokens=float(self.ema_student_new),
+                train_ema_student_total_tokens=float(self.ema_student_total),
+                train_student_new_tokens_max=float(max_t[2].item()),
+                train_student_total_tokens_max=float(max_t[3].item()),
+                train_ema_student_truncation_rate=float(self.ema_student_trunc_rate),
             )
 
     def on_step_begin(self, args, state, control, **kwargs):
@@ -1313,10 +1433,23 @@ def main() -> None:
         bad_format_flags: List[float] = []
         overlong_flags: List[float] = []
         s_prompts: List[str] = []
+        teacher_new_lens: List[int] = []
+        teacher_total_lens: List[int] = []
+        student_prompt_lens: List[int] = []
 
         for i, comp in enumerate(completions):
             raw_completion = _extract_text_completion(comp)
             extracted_hint = extract_final_hint_text(raw_completion)
+
+            prompt_text = str(prompts[i]) if i < len(prompts) else ''
+            teacher_prompt_len = _token_count(teacher_tok, prompt_text)
+            if completion_ids is not None and i < len(completion_ids) and completion_ids[i] is not None:
+                teacher_new_len = int(len(completion_ids[i]))
+            else:
+                teacher_new_len = _token_count(teacher_tok, raw_completion)
+            teacher_total_len = teacher_prompt_len + teacher_new_len
+            teacher_new_lens.append(teacher_new_len)
+            teacher_total_lens.append(teacher_total_len)
 
             gold = str(ans[i]) if i < len(ans) else ''
             base = float(ps[i]) if i < len(ps) else 0.0
@@ -1354,6 +1487,7 @@ def main() -> None:
             s_prompts.append(
                 maybe_apply_chat_template(student_tok, s_msgs, enable_thinking=enable_thinking)
             )
+            student_prompt_lens.append(_token_count(student_tok, s_prompts[-1]))
 
         t_s0 = time.perf_counter()
         if student_remote is not None:
@@ -1396,6 +1530,11 @@ def main() -> None:
             )
             rewards.append(float(reward))
 
+            student_new_len = _token_count(student_tok, s_outs[i])
+            student_total_len = student_prompt_lens[i] + student_new_len
+            teacher_trunc = int(teacher_new_lens[i] >= hint_total_cap)
+            student_trunc = int(student_new_len >= stud_max)
+
             METRICS_ACCUM.add(
                 delta=float(delta),
                 leak=float(leaks[i]),
@@ -1403,6 +1542,12 @@ def main() -> None:
                 reward=float(reward),
                 reward_student_time=float(per_item_student_s),
                 reward_total_time=float((time.perf_counter() - t_reward0) + per_item_student_s),
+                teacher_new=float(teacher_new_lens[i]),
+                teacher_total=float(teacher_total_lens[i]),
+                student_new=float(student_new_len),
+                student_total=float(student_total_len),
+                teacher_trunc=teacher_trunc,
+                student_trunc=student_trunc,
             )
 
         return rewards
